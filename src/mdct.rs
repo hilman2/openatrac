@@ -85,12 +85,8 @@ impl MdctContext {
                 output[sb][k] = sum as f32;
             }
 
-            // Swap odd bands (from atracdenc: reverses spectral order for QMF mirroring)
-            if sb & 1 != 0 {
-                for i in 0..SUBBAND_SAMPLES / 2 {
-                    output[sb].swap(i, SUBBAND_SAMPLES - 1 - i);
-                }
-            }
+            // Note: band swap disabled for testing
+            // if sb & 1 != 0 { ... }
         }
 
         output

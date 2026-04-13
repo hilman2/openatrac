@@ -111,7 +111,7 @@ impl Atrac3Encoder {
             let max_val = spectrum[s..e].iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
             if max_val < 0.001 { continue; }
 
-            // Choose target word_len based on subband position
+            // Adaptive wl based on subband importance
             let target_wl: i32 = if sb < 8 { 6 } else if sb < 16 { 4 } else { 2 };
 
             // Try target_wl, reduce if doesn't fit

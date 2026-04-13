@@ -9,3 +9,4 @@ pub mod mdct_window;
 pub mod spectral;
 pub mod huffman;
 pub mod vlc_encode;
+pub mod mdct_native;

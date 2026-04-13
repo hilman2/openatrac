@@ -73,13 +73,14 @@ impl MdctContext {
             }
             self.mdct_overlap[channel][sb].copy_from_slice(&bands[sb]);
 
-            // Forward MDCT: cos(PI/N * (n+0.5+N/2) * (k+0.5)), scale=1.0
+            // Forward MDCT: cos(PI/N * (n+0.5+N/4) * (k+0.5)), scale=1.0
+            // N/4 phase offset (standard MDCT, confirmed by DC test)
             let n = MDCT_N as f64;
             for k in 0..SUBBAND_SAMPLES {
                 let mut sum = 0.0f64;
                 let kf = std::f64::consts::PI / n * (k as f64 + 0.5);
                 for i in 0..MDCT_N {
-                    sum += block[i] * ((i as f64 + 0.5 + n / 2.0) * kf).cos();
+                    sum += block[i] * ((i as f64 + 0.5 + n / 4.0) * kf).cos();
                 }
                 output[sb][k] = sum as f32;
             }

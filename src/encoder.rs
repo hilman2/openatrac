@@ -23,7 +23,7 @@ pub struct Atrac3Encoder {
     frame_count: u32,
 }
 
-const NUM_QMF_BANDS: u8 = 2;
+const NUM_QMF_BANDS: u8 = 3; // 0xA3 header: 4 QMF bands (matching atracdenc)
 const TOTAL_COEFFS: usize = 1024;
 
 // Dequantization tables (sym -> dequant value, from EXE)

@@ -118,16 +118,18 @@ impl Atrac3Encoder {
             let e = SUBBAND_ENDS[sb];
             let n = (e - s) as u32;
             let max_val = spectrum[s..e].iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
-            if max_val < 1.0 { continue; }
+            if max_val < 0.001 { continue; }
 
-            // Scale factor ≈ max amplitude of this subband
-            // PCM ≈ sf when dequant is at max, so sf should match max spectrum value
-            let sf_idx = find_scale_factor(max_val);
+            // Scale factor: sf * max_dequant ≈ max_spectral_value
+            // So sf ≈ max_val / max_dequant
+            // For wl=1: max_dequant = 3906
+            let needed_sf = max_val / 3906.0;
+            let sf_idx = find_scale_factor(needed_sf);
             sf_indices[sb] = sf_idx;
 
-            // Use wl=1 (5 symbols, max 3 bits/coeff) for reliable fit
+            // Use wl=1 for now (5 symbols, reliable budget)
             let wl = 1i32;
-            let est = 6 + n * 3; // worst case: 3 bits per coeff
+            let est = 6 + n * 3;
             if used_bits + est <= available_bits {
                 word_lens[sb] = wl;
                 used_bits += est;

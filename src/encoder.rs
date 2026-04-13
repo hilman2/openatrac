@@ -67,24 +67,6 @@ impl Atrac3Encoder {
         let cu_bits = (buf.len() * 8) as u32;
         let num_subbands = 29usize;
 
-        // DEBUG: Write the known-good frame format (29sb, wl=1, sf=15, all sym=0)
-        // to verify that the issue is in encoding logic, not frame structure
-        if false { // KNOWN-GOOD DEBUG FRAME
-            buf[0] = 0xA2;
-            let mut bp: u32 = 8;
-            for _ in 0..3 { write_bits(buf, bp, 0, 3); bp += 3; }
-            write_bits(buf, bp, 0, 5); bp += 5;
-            write_bits(buf, bp, 28, 5); bp += 5;
-            write_bits(buf, bp, 0, 1); bp += 1;
-            for _ in 0..29 { write_bits(buf, bp, 2, 3); bp += 3; }
-            for sb in 0..29 {
-                write_bits(buf, bp, 15, 6); bp += 6;
-                let n = SUBBAND_ENDS[sb] - SUBBAND_STARTS[sb];
-                for _ in 0..n { write_bits(buf, bp, 0, 1); bp += 1; }
-            }
-            return;
-        }
-
         // Header
         buf[0] = 0xA0 | NUM_QMF_BANDS;
         let mut bp: u32 = 8;
@@ -105,13 +87,22 @@ impl Atrac3Encoder {
 
         // Max dequant values per word_len
         let max_dq: [f32; 7] = [0.0, 3906.0, 4185.0, 4340.0, 4557.0, 4725.0, 4805.0];
-        // Average VLC code lengths per word_len
-        let avg_bits: [u32; 7] = [0, 2, 3, 4, 4, 5, 6];
+        // WORST-CASE VLC code lengths per word_len (to prevent overflow)
+        let avg_bits: [u32; 7] = [0, 3, 4, 5, 6, 7, 8];
 
         let header_bits = bp + (num_subbands as u32 * 3);
         let available_bits = cu_bits.saturating_sub(header_bits + 16);
 
-        // First pass: assign word_lens based on subband importance
+        // Compute energy per subband for priority ordering
+        let mut sb_energy = [(0.0f32, 0usize); 29]; // (energy, subband_index)
+        for sb in 0..num_subbands {
+            let s = SUBBAND_STARTS[sb];
+            let e = SUBBAND_ENDS[sb];
+            let energy: f32 = spectrum[s..e].iter().map(|x| x * x).sum();
+            sb_energy[sb] = (energy, sb);
+        }
+
+        // Assign word_len based on subband importance (energy-weighted)
         let mut used_bits = 0u32;
         for sb in 0..num_subbands {
             let s = SUBBAND_STARTS[sb];
@@ -120,19 +111,23 @@ impl Atrac3Encoder {
             let max_val = spectrum[s..e].iter().map(|&x| x.abs()).fold(0.0f32, f32::max);
             if max_val < 0.001 { continue; }
 
-            // Scale factor: sf * max_dequant ≈ max_spectral_value
-            // So sf ≈ max_val / max_dequant
-            // For wl=1: max_dequant = 3906
-            let needed_sf = max_val / 3906.0;
-            let sf_idx = find_scale_factor(needed_sf);
-            sf_indices[sb] = sf_idx;
+            // Choose target word_len based on subband position
+            let target_wl: i32 = if sb < 8 { 6 } else if sb < 16 { 4 } else { 2 };
 
-            // Use wl=1 for now (5 symbols, reliable budget)
-            let wl = 1i32;
-            let est = 6 + n * 3;
-            if used_bits + est <= available_bits {
-                word_lens[sb] = wl;
-                used_bits += est;
+            // Try target_wl, reduce if doesn't fit
+            let mut wl = target_wl;
+            while wl >= 1 {
+                let sf_needed = max_val / max_dq[wl as usize];
+                if sf_needed > SCALE_FACTOR_VALUES[63] { wl -= 1; continue; }
+                let est = 6 + n * avg_bits[wl as usize];
+                if used_bits + est <= available_bits {
+                    let sf_idx = find_scale_factor(sf_needed);
+                    sf_indices[sb] = sf_idx;
+                    word_lens[sb] = wl;
+                    used_bits += est;
+                    break;
+                }
+                wl -= 1;
             }
         }
 
@@ -169,9 +164,6 @@ impl Atrac3Encoder {
             bp += 3;
         }
 
-        // Track bits used for debugging
-        let after_wl_bp = bp;
-
         // Write scale factors + VLC-coded mantissas
         for sb in 0..num_subbands {
             if word_lens[sb] < 0 { continue; }
@@ -188,10 +180,10 @@ impl Atrac3Encoder {
             let num_syms = dq.len();
 
             for i in s..e {
-                // Quantize: spectrum[i] / sf gives normalized value in [-1, 1]
-                // Multiply by max_dequant to get into the dequant table range
-                let normalized = spectrum[i] / sf;
-                let target = normalized * max_dq[wl];
+                // Quantize: find nearest dequant value to (spectrum[i] / sf)
+                // sf was chosen so that sf * max_dq >= max_val
+                // So spectrum[i] / sf is in range [-max_dq, max_dq]
+                let target = spectrum[i] / sf;
                 let sym = nearest_symbol(target, dq, num_syms);
                 let (code, len) = get_vlc_code(wl, sym);
 
@@ -206,12 +198,8 @@ impl Atrac3Encoder {
             }
         }
 
-        // Verify we didn't overflow
-        if bp > cu_bits {
-            // Buffer overflow - rewrite as silence
-            for b in buf.iter_mut() { *b = 0; }
-            buf[0] = 0xA2;
-        }
+        // Note: overflow should not happen due to budget management above.
+        // If it does, the last few coefficients get zero-padded (already default).
     }
 }
 

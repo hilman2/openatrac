@@ -1,63 +1,77 @@
-use crate::tables::mdct_native::{POST_COS, POST_SCALE, POST_INDEX};
-
 const SUBBAND_SAMPLES: usize = 256;
 const NUM_SUBBANDS: usize = 4;
 const FRAME_SAMPLES: usize = 1024;
 
 pub struct MdctContext {
-    /// Previous frame's interleaved work buffer [channel][1024]
-    overlap: Vec<[f32; 1024]>,
+    /// Previous frame's PCM samples for overlap [channel][1024]
+    prev_pcm: Vec<[f32; FRAME_SAMPLES]>,
     num_channels: usize,
 }
 
 impl MdctContext {
     pub fn new(num_channels: usize) -> Self {
         MdctContext {
-            overlap: vec![[0.0; 1024]; num_channels],
+            prev_pcm: vec![[0.0; FRAME_SAMPLES]; num_channels],
             num_channels,
         }
     }
 
-    /// Transform 1024 PCM samples into 4×256 spectral coefficients.
-    /// This replicates the algorithm in FUN_0043a220 from the decompiled encoder.
     pub fn analyze_frame(&mut self, channel: usize, samples: &[f32]) -> [[f32; SUBBAND_SAMPLES]; NUM_SUBBANDS] {
         assert!(samples.len() >= FRAME_SAMPLES);
 
-        // Step 1: Input rearrangement (4-band interleaving)
-        // Creates a 1024-element work buffer with bands interleaved
-        let mut work = [0.0f32; FRAME_SAMPLES];
+        // The ATRAC3 encoder uses interleaved 4-band processing:
+        // 1024 PCM samples are rearranged into 4 interleaved bands
+        // Then per-band 512-point MDCT (256 overlap + 256 current) produces 256 spectral coefficients
+
+        // Rearrange BOTH previous and current frames
+        let prev = &self.prev_pcm[channel];
+
+        // Interleaving pattern from decompiled FUN_0043a220:
+        // work[4*i+0] = pcm[i]        (band 0, samples 0-255, forward)
+        // work[4*i+2] = pcm[i+512]    (band 2, samples 512-767, forward)
+        // work[1023-4*i-2] = pcm[i+256] (band 1, samples 256-511, reverse)
+        // work[1023-4*i] = pcm[i+768]   (band 3, samples 768-1023, reverse)
+
+        let mut prev_il = [0.0f32; FRAME_SAMPLES];
+        let mut curr_il = [0.0f32; FRAME_SAMPLES];
         for i in 0..256 {
-            work[4 * i]           = samples[i];       // Band 0 forward
-            work[4 * i + 2]       = samples[i + 512]; // Band 2 forward
-            work[1023 - 4 * i - 2] = samples[i + 256]; // Band 1 reverse
-            work[1023 - 4 * i]     = samples[i + 768]; // Band 3 reverse
+            prev_il[4*i]       = prev[i];
+            prev_il[4*i + 2]   = prev[i + 512];
+            prev_il[1023-4*i-2] = prev[i + 256];
+            prev_il[1023-4*i]   = prev[i + 768];
+
+            curr_il[4*i]       = samples[i];
+            curr_il[4*i + 2]   = samples[i + 512];
+            curr_il[1023-4*i-2] = samples[i + 256];
+            curr_il[1023-4*i]   = samples[i + 768];
         }
 
-        // Step 2: The MDCT needs 512 samples per subband (256 overlap + 256 current)
-        // At stride 4, that's 1024 + 1024 = 2048 interleaved samples
-        // Previous frame's interleaved data (1024 floats) + current work (1024 floats)
-        let mut combined = vec![0.0f32; 2048];
-        combined[..1024].copy_from_slice(&self.overlap[channel][..]);
-        combined[1024..].copy_from_slice(&work[..]);
-        // Save current frame for next overlap
-        self.overlap[channel][..].copy_from_slice(&work[..]);
+        // Save current PCM for next frame
+        self.prev_pcm[channel].copy_from_slice(&samples[..FRAME_SAMPLES]);
 
-        // Step 3: Per-subband forward MDCT
-        // Each subband is extracted at stride 4 from the combined buffer,
-        // giving 256 samples per subband (128 from overlap + 128 from current)
+        // Per-subband MDCT with overlap
         let mut output = [[0.0f32; SUBBAND_SAMPLES]; NUM_SUBBANDS];
-
-        // Sine window for 512-point MDCT
-        let n = 512;
+        let n = 512usize;
 
         for sb in 0..NUM_SUBBANDS {
-            // Extract subband samples from interleaved combined buffer
+            // Extract 256 samples from previous and current interleaved buffers at stride 4
+            // Bands 1 and 3 were written in REVERSE order in the interleaving step,
+            // so we need to read them in reverse to get correct time-domain order
             let mut block = [0.0f64; 512];
             for i in 0..256 {
-                // First half (overlap): from previous frame's interleaved data
-                block[i] = combined[4 * i + sb] as f64;
-                // Second half (current): from current frame's interleaved data
-                block[256 + i] = combined[1024 + 4 * i + sb] as f64;
+                let idx = if sb == 1 || sb == 3 {
+                    4 * (255 - i) + sb  // reverse for odd bands
+                } else {
+                    4 * i + sb          // forward for even bands
+                };
+                block[i] = prev_il[idx] as f64;
+
+                let idx2 = if sb == 1 || sb == 3 {
+                    4 * (255 - i) + sb
+                } else {
+                    4 * i + sb
+                };
+                block[256 + i] = curr_il[idx2] as f64;
             }
 
             // Apply sine window
@@ -66,7 +80,7 @@ impl MdctContext {
                 block[i] *= w;
             }
 
-            // Forward MDCT: X[k] = sum x[n] * cos(PI/N * (n + 0.5 + N/4) * (k + 0.5))
+            // Forward MDCT: 512 → 256 coefficients
             let scale = 2.0 / n as f64;
             for k in 0..256 {
                 let mut sum = 0.0f64;
@@ -76,25 +90,6 @@ impl MdctContext {
                 }
                 output[sb][k] = (sum * scale) as f32;
             }
-        }
-
-        // Step 4: Apply post-processing twiddle rotation
-        // The reference encoder applies rotation using POST_COS and POST_SCALE
-        // tables indexed by POST_INDEX
-        // This corrects the phase relationship between the QMF subbands
-        for idx in 0..128 {
-            let k = POST_INDEX[idx] as usize;
-            if k >= 128 { continue; }
-
-            let cos_val = POST_COS[k];
-            let scale_val = POST_SCALE[k]; // approximately 2*cos(theta)
-
-            // Rotate pairs between subbands 0 and 2 (low and mid-hi bands)
-            let a = output[0][k];
-            let b = output[2][127 - k];
-            let half_scale = scale_val * 0.5;
-            output[0][k] = a * cos_val + b * half_scale;
-            output[2][127 - k] = -a * half_scale + b * cos_val;
         }
 
         output

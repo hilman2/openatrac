@@ -63,11 +63,13 @@ impl MdctContext {
         let mut output = [[0.0f32; SUBBAND_SAMPLES]; NUM_SUBBANDS];
 
         for sb in 0..NUM_SUBBANDS {
-            // MDCT with overlap (no explicit windowing for now — window is handled by decoder)
+            // MDCT with sine window + overlap (standard for ATRAC3)
             let mut block = [0.0f64; MDCT_N];
             for i in 0..SUBBAND_SAMPLES {
-                block[i] = self.mdct_overlap[channel][sb][i] as f64;
-                block[SUBBAND_SAMPLES + i] = bands[sb][i] as f64;
+                let w0 = ((i as f64 + 0.5) * std::f64::consts::PI / MDCT_N as f64).sin();
+                let w1 = (((SUBBAND_SAMPLES + i) as f64 + 0.5) * std::f64::consts::PI / MDCT_N as f64).sin();
+                block[i] = self.mdct_overlap[channel][sb][i] as f64 * w0;
+                block[SUBBAND_SAMPLES + i] = bands[sb][i] as f64 * w1;
             }
             self.mdct_overlap[channel][sb].copy_from_slice(&bands[sb]);
 
